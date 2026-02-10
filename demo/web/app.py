@@ -46,11 +46,10 @@ def get_timestamp():
     """Generate timestamp string in format: YYYY-MM-DD HH:MM:SS.mmm with timezone conversion."""
     # Get current UTC time
     timestamp = (
-        datetime.datetime.utcnow()
-        .replace(tzinfo=datetime.timezone.utc)  # Add UTC timezone info
+        datetime.datetime.now(datetime.timezone.utc)
         .astimezone(
-            datetime.timezone(datetime.timedelta(hours=8))
-        )  # Convert to +8 timezone (Singapore/HK)
+            datetime.timezone(datetime.timedelta(hours=9))
+        )  # Convert to +9 timezone (Seoul)
         .strftime("%Y-%m-%d %H:%M:%S.%f")[
             :-3
         ]  # Format and truncate microseconds to milliseconds
