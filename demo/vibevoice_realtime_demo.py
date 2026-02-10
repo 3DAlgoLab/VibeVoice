@@ -1,4 +1,6 @@
-import argparse, os, uvicorn
+import argparse
+import os
+import uvicorn
 
 def main():
     p = argparse.ArgumentParser()
