@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import traceback
+from contextlib import asynccontextmanager
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Callable, Dict, Iterator, Optional, Tuple, cast
@@ -31,12 +32,14 @@ SAMPLE_RATE = 24_000
 
 
 def get_timestamp():
-    timestamp = datetime.datetime.utcnow().replace(
-        tzinfo=datetime.timezone.utc
-    ).astimezone(
-        datetime.timezone(datetime.timedelta(hours=8))
-    ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    timestamp = (
+        datetime.datetime.utcnow()
+        .replace(tzinfo=datetime.timezone.utc)
+        .astimezone(datetime.timezone(datetime.timedelta(hours=8)))
+        .strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    )
     return timestamp
+
 
 class StreamingTTSService:
     def __init__(
@@ -58,7 +61,7 @@ class StreamingTTSService:
 
         if device == "mpx":
             print("Note: device 'mpx' detected, treating it as 'mps'.")
-            device = "mps"        
+            device = "mps"
         if device == "mps" and not torch.backends.mps.is_available():
             print("Warning: MPS not available. Falling back to CPU.")
             device = "cpu"
@@ -69,7 +72,6 @@ class StreamingTTSService:
         print(f"[startup] Loading processor from {self.model_path}")
         self.processor = VibeVoiceStreamingProcessor.from_pretrained(self.model_path)
 
-        
         # Decide dtype & attention
         if self.device == "mps":
             load_dtype = torch.float32
@@ -77,33 +79,41 @@ class StreamingTTSService:
             attn_impl_primary = "sdpa"
         elif self.device == "cuda":
             load_dtype = torch.bfloat16
-            device_map = 'cuda'
+            device_map = "cuda"
             attn_impl_primary = "flash_attention_2"
         else:
             load_dtype = torch.float32
-            device_map = 'cpu'
+            device_map = "cpu"
             attn_impl_primary = "sdpa"
-        print(f"Using device: {device_map}, torch_dtype: {load_dtype}, attn_implementation: {attn_impl_primary}")
+        print(
+            f"Using device: {device_map}, torch_dtype: {load_dtype}, attn_implementation: {attn_impl_primary}"
+        )
         # Load model
         try:
-            self.model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
-                self.model_path,
-                torch_dtype=load_dtype,
-                device_map=device_map,
-                attn_implementation=attn_impl_primary,
+            self.model = (
+                VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
+                    self.model_path,
+                    torch_dtype=load_dtype,
+                    device_map=device_map,
+                    attn_implementation=attn_impl_primary,
+                )
             )
-            
+
             if self.device == "mps":
                 self.model.to("mps")
         except Exception as e:
-            if attn_impl_primary == 'flash_attention_2':
-                print("Error loading the model. Trying to use SDPA. However, note that only flash_attention_2 has been fully tested, and using SDPA may result in lower audio quality.")
-                
-                self.model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
-                    self.model_path,
-                    torch_dtype=load_dtype,
-                    device_map=self.device,
-                    attn_implementation='sdpa',
+            if attn_impl_primary == "flash_attention_2":
+                print(
+                    "Error loading the model. Trying to use SDPA. However, note that only flash_attention_2 has been fully tested, and using SDPA may result in lower audio quality."
+                )
+
+                self.model = (
+                    VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
+                        self.model_path,
+                        torch_dtype=load_dtype,
+                        device_map=self.device,
+                        attn_implementation="sdpa",
+                    )
                 )
                 print("Load model with SDPA successfully ")
             else:
@@ -167,8 +177,14 @@ class StreamingTTSService:
 
         return self._voice_cache[key]
 
-    def _get_voice_resources(self, requested_key: Optional[str]) -> Tuple[str, object, Path, str]:
-        key = requested_key if requested_key and requested_key in self.voice_presets else self.default_voice_key
+    def _get_voice_resources(
+        self, requested_key: Optional[str]
+    ) -> Tuple[str, object, Path, str]:
+        key = (
+            requested_key
+            if requested_key and requested_key in self.voice_presets
+            else self.default_voice_key
+        )
         if key is None:
             key = next(iter(self.voice_presets))
             self.default_voice_key = key
@@ -332,21 +348,15 @@ class StreamingTTSService:
         return pcm.tobytes()
 
 
-app = FastAPI()
-
-
-@app.on_event("startup")
-async def _startup() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     model_path = os.environ.get("MODEL_PATH")
     if not model_path:
         raise RuntimeError("MODEL_PATH not set in environment")
 
     device = os.environ.get("MODEL_DEVICE", "cuda")
-    
-    service = StreamingTTSService(
-        model_path=model_path,
-        device=device
-    )
+
+    service = StreamingTTSService(model_path=model_path, device=device)
     service.load()
 
     app.state.tts_service = service
@@ -355,10 +365,16 @@ async def _startup() -> None:
     app.state.websocket_lock = asyncio.Lock()
     print("[startup] Model ready.")
 
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
 
 def streaming_tts(text: str, **kwargs) -> Iterator[np.ndarray]:
     service: StreamingTTSService = app.state.tts_service
     yield from service.stream(text, **kwargs)
+
 
 @app.websocket("/stream")
 async def websocket_stream(ws: WebSocket) -> None:
@@ -512,4 +528,3 @@ def get_config():
         "voices": voices,
         "default_voice": service.default_voice_key,
     }
-
